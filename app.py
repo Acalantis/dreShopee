@@ -1,4 +1,3 @@
-
 import pandas as pd
 import streamlit as st
 import os
@@ -9,74 +8,154 @@ def processar_shopee(file_shopee):
         return "Erro: Nenhuma planilha da Shopee foi carregada."
 
     try:
+        # Lê a planilha Shopee
         df_shopee = pd.read_excel(file_shopee, header=0)
+
+        # Remover colunas "Unnamed" e colunas em branco
         df_shopee = df_shopee.loc[:, ~df_shopee.columns.str.contains('^Unnamed', na=False)]
         df_shopee = df_shopee.dropna(axis=1, how='all')
-        df_shopee.columns = df_shopee.columns.str.strip()
+        df_shopee.columns = df_shopee.columns.str.strip()  # limpar espaços
     except Exception as e:
         return f"Erro ao ler a planilha de Shopee: {e}"
 
-    colunas_necessarias = ['Preço acordado', 'Cupom do vendedor', 'Taxa de comissão', 'Taxa de serviço']
-    for coluna in colunas_necessarias:
-        if coluna not in df_shopee.columns:
-            return f"Erro: A coluna '{coluna}' não foi encontrada na planilha de Shopee."
-
-    status_coluna = next((col for col in df_shopee.columns if 'status' in col.lower()), None)
+    # -------------------- FILTRAGEM --------------------
+    status_coluna = next((col for col in df_shopee.columns if 'status do pedido' in col.lower()), None)
     if status_coluna is None:
-        return "Erro: A coluna de status do pedido não foi encontrada na planilha de Shopee."
+        return "Erro: A coluna 'Status do pedido' não foi encontrada."
 
-    df_shopee = df_shopee[~df_shopee[status_coluna].str.contains('cancelado|não pago', case=False, na=False)]
-    df_shopee['Preço acordado'] = pd.to_numeric(df_shopee['Preço acordado'], errors='coerce')
-    faturamento_total = df_shopee['Preço acordado'].sum()
+    padroes_exclusao = ['cancelado', 'cancelados', 'cancelada', 'canceladas', 'não pago', 'não pagos']
+    df_shopee = df_shopee[~df_shopee[status_coluna].str.contains('|'.join(padroes_exclusao), case=False, na=False)]
 
-    df_shopee['Taxa de comissão'] = pd.to_numeric(df_shopee['Taxa de comissão'], errors='coerce')
-    df_shopee['Taxa de serviço'] = pd.to_numeric(df_shopee['Taxa de serviço'], errors='coerce')
-    df_shopee['Cupom do vendedor'] = pd.to_numeric(df_shopee['Cupom do vendedor'], errors='coerce')
-    df_shopee['Cupom do vendedor'].fillna(0, inplace=True)
-    comissao_total = df_shopee['Taxa de comissão'].sum() + df_shopee['Taxa de serviço'].sum() + df_shopee['Cupom do vendedor'].sum()
+    # -------------------- FATURAMENTO --------------------
+    if 'Subtotal do produto' not in df_shopee.columns:
+        return "Erro: A coluna 'Subtotal do produto' não foi encontrada."
+    df_shopee['Subtotal do produto'] = pd.to_numeric(df_shopee['Subtotal do produto'], errors='coerce')
+    faturamento_total = df_shopee['Subtotal do produto'].sum()  # mantém duplicatas
 
-    status_devolucao_coluna = next((col for col in df_shopee.columns if 'status da devolução' in col.lower() or 'reembolso' in col.lower()), None)
-    if status_devolucao_coluna:
-        df_devolucoes = df_shopee[df_shopee[status_devolucao_coluna].notna()]
-        valor_devolucao = df_devolucoes['Preço acordado'].sum()
-    else:
+    # -------------------- COMISSÕES --------------------
+    df_comissao = df_shopee.copy()
+    if 'ID do pedido' in df_comissao.columns:
+        df_comissao = df_comissao.drop_duplicates(subset=['ID do pedido'], keep='first')
+
+    colunas_comissao = ['Taxa de comissão', 'Taxa de serviço', 'Cupom do vendedor', 'Cupom Shopee']
+    for coluna in colunas_comissao:
+        if coluna not in df_comissao.columns:
+            return f"Erro: A coluna '{coluna}' não foi encontrada."
+
+    for coluna in colunas_comissao:
+        df_comissao[coluna] = pd.to_numeric(df_comissao[coluna], errors='coerce').fillna(0)
+
+    comissoes_detalhadas = df_comissao[colunas_comissao].sum()
+    comissao_total = comissoes_detalhadas.sum()
+
+    # -------------------- DEVOLUÇÕES --------------------
+    if 'Status da Devolução / Reembolso' not in df_shopee.columns:
         valor_devolucao = 0
+    else:
+        df_devolucoes = df_shopee[df_shopee['Status da Devolução / Reembolso'].notna()]
+        df_devolucoes['Subtotal do produto'] = pd.to_numeric(df_devolucoes['Subtotal do produto'], errors='coerce')
+        valor_devolucao = df_devolucoes['Subtotal do produto'].sum()
 
+    # -------------------- ENTREGA DIRETA --------------------
+    valor_entrega_direta = 0
+    if (
+        'ID do pedido' in df_shopee.columns
+        and 'Opção de envio' in df_shopee.columns
+        and 'Valor estimado do frete' in df_shopee.columns
+    ):
+        df_entrega = df_shopee.copy()
+
+        # Remover duplicatas pelo ID do pedido
+        df_entrega = df_entrega.drop_duplicates(subset=['ID do pedido'], keep='first')
+
+        # Excluir cancelados e não pagos
+        df_entrega = df_entrega[~df_entrega[status_coluna].str.contains('|'.join(padroes_exclusao), case=False, na=False)]
+
+        # Filtrar apenas Entrega Direta
+        df_entrega = df_entrega[df_entrega['Opção de envio'].str.contains('Shopee Entrega Direta', case=False, na=False)]
+
+        # Somar o Valor estimado do frete
+        df_entrega['Valor estimado do frete'] = pd.to_numeric(df_entrega['Valor estimado do frete'], errors='coerce').fillna(0)
+        valor_entrega_direta = df_entrega['Valor estimado do frete'].sum()
+
+    # -------------------- QUANTIDADE DE PEDIDOS --------------------
+    qtd_pedidos = 0
+    if 'ID do pedido' in df_shopee.columns:
+        df_pedidos = df_shopee.copy()
+
+        # 1. Remover duplicatas pelo ID do pedido
+        df_pedidos = df_pedidos.drop_duplicates(subset=['ID do pedido'], keep='first')
+
+        # 2. Excluir cancelados e não pagos
+        df_pedidos = df_pedidos[~df_pedidos[status_coluna].str.contains('|'.join(padroes_exclusao), case=False, na=False)]
+
+        # 3. Contar o número de pedidos únicos válidos
+        qtd_pedidos = len(df_pedidos)
+
+    # -------------------- PLANILHA DE SAÍDA --------------------
     tabela_resumo = {
         'Faturamento Shopee': faturamento_total,
-        'Comissão Shopee': comissao_total,
-        'Valor Devolvido': valor_devolucao
+        'Taxa de comissão': comissoes_detalhadas['Taxa de comissão'],
+        'Taxa de serviço': comissoes_detalhadas['Taxa de serviço'],
+        'Cupom do vendedor': comissoes_detalhadas['Cupom do vendedor'],
+        'Cupom Shopee': comissoes_detalhadas['Cupom Shopee'],
+        'Comissão Total': comissao_total,
+        'Valor Devolvido': valor_devolucao,
+        'Entrega Direta (Frete)': valor_entrega_direta,
+        'Quantidade de Pedidos': qtd_pedidos
     }
 
     df_dre = pd.DataFrame(tabela_resumo.items(), columns=['Descrição', 'Valor'])
+
+    # Palavras que devem ficar amarelas
+    destaques = [
+        'Faturamento Shopee',
+        'Comissão Total',
+        'Valor Devolvido',
+        'Entrega Direta (Frete)',
+        'Quantidade de Pedidos'
+    ]
+
+    def highlight_rows(s):
+        return ['background-color: yellow' if v in destaques else '' for v in s]
+
+    df_styled = df_dre.style.apply(highlight_rows, subset=['Descrição'])
+
+    # Salvar Excel estilizado
     output_dir = 'uploads'
-    os.makedirs(output_dir, exist_ok=True)
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
     output_filepath = os.path.join(output_dir, "DRE_shopee.xlsx")
     try:
-        df_dre.to_excel(output_filepath, index=False)
+        df_styled.to_excel(output_filepath, index=False, engine="openpyxl")
     except Exception as e:
         return f"Erro ao gerar o arquivo Excel: {e}"
 
     return output_filepath
 
+
+# Função principal Streamlit
 def main():
-    st.title("📊 **Gerador de DRE - Faturamento e Comissão**")
-    st.write("Escolha o Marketplace e faça o upload das planilhas necessárias.")
+    st.title("📊 **Gerador de DRE - Shopee**")
+    st.write("Envie sua planilha da Shopee para gerar o relatório.")
+
     marketplace = st.radio("🛒 **Selecione o Marketplace:**", ["Shopee", "Mercado Livre", "Amazon"], horizontal=True)
 
     if marketplace == "Shopee":
-        file_shopee = st.file_uploader("🔽 **Envie sua planilha da Shopee**:", type=["xls", "xlsx"])
+        file_shopee = st.file_uploader("🔽 **Envie a planilha Shopee**:", type=["xls", "xlsx"])
         if file_shopee is not None:
-            if st.button("📊 **Gerar Relatório de Shopee**"):
-                st.info("🔄 **Processando... Aguarde!**")
+            if st.button("📊 **Gerar Relatório**"):
+                st.info("🔄 Processando... Aguarde.")
                 output_filepath_shopee = processar_shopee(file_shopee)
+
                 if "Erro" in output_filepath_shopee:
                     st.error(output_filepath_shopee)
                 else:
                     st.success("✅ Relatório gerado com sucesso!")
                     with open(output_filepath_shopee, "rb") as f:
                         st.download_button(
-                            label="📥 **Baixar Relatório de Shopee (DRE)**",
+                            label="📥 **Baixar Relatório Shopee (DRE)**",
                             data=f,
                             file_name="DRE_shopee.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
