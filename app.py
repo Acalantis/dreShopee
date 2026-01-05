@@ -2,16 +2,23 @@ import pandas as pd
 import streamlit as st
 import os
 
-# Função para processar Shopee
+# -------------------- FUNÇÃO AUXILIAR --------------------
+def encontrar_coluna(df, possiveis_nomes):
+    for nome in possiveis_nomes:
+        if nome in df.columns:
+            return nome
+    return None
+
+
+# -------------------- FUNÇÃO PRINCIPAL --------------------
 def processar_shopee(file_shopee):
     if file_shopee is None:
         return "Erro: Nenhuma planilha da Shopee foi carregada."
 
     try:
-        # Lê a planilha Shopee
         df_shopee = pd.read_excel(file_shopee, header=0)
 
-        # Remover colunas "Unnamed" e colunas em branco
+        # Limpeza de colunas
         df_shopee = df_shopee.loc[:, ~df_shopee.columns.str.contains('^Unnamed', na=False)]
         df_shopee = df_shopee.dropna(axis=1, how='all')
         df_shopee.columns = df_shopee.columns.str.strip()
@@ -19,7 +26,9 @@ def processar_shopee(file_shopee):
         return f"Erro ao ler a planilha de Shopee: {e}"
 
     # -------------------- FILTRAGEM --------------------
-    status_coluna = next((col for col in df_shopee.columns if 'status do pedido' in col.lower()), None)
+    status_coluna = next(
+        (col for col in df_shopee.columns if 'status do pedido' in col.lower()), None
+    )
     if status_coluna is None:
         return "Erro: A coluna 'Status do pedido' não foi encontrada."
 
@@ -43,21 +52,42 @@ def processar_shopee(file_shopee):
     if 'ID do pedido' in df_comissao.columns:
         df_comissao = df_comissao.drop_duplicates(subset=['ID do pedido'], keep='first')
 
-    colunas_comissao = [
-        'Taxa de comissão bruta',
-        'Taxa de serviço bruta',
-        'Cupom do vendedor',
-        'Cupom Shopee'
-    ]
+    coluna_comissao = encontrar_coluna(
+        df_comissao,
+        ['Taxa de comissão bruta', 'Taxa de comissão']
+    )
+    coluna_servico = encontrar_coluna(
+        df_comissao,
+        ['Taxa de serviço bruta', 'Taxa de serviço']
+    )
+    coluna_cupom_vendedor = encontrar_coluna(df_comissao, ['Cupom do vendedor'])
+    coluna_cupom_shopee = encontrar_coluna(df_comissao, ['Cupom Shopee'])
 
-    for coluna in colunas_comissao:
-        if coluna not in df_comissao.columns:
-            return f"Erro: A coluna '{coluna}' não foi encontrada."
+    if not coluna_comissao:
+        return "Erro: Não foi encontrada a coluna de Taxa de comissão."
+    if not coluna_servico:
+        return "Erro: Não foi encontrada a coluna de Taxa de serviço."
+    if not coluna_cupom_vendedor:
+        return "Erro: A coluna 'Cupom do vendedor' não foi encontrada."
+    if not coluna_cupom_shopee:
+        return "Erro: A coluna 'Cupom Shopee' não foi encontrada."
 
+    for coluna in [
+        coluna_comissao,
+        coluna_servico,
+        coluna_cupom_vendedor,
+        coluna_cupom_shopee
+    ]:
         df_comissao[coluna] = pd.to_numeric(df_comissao[coluna], errors='coerce').fillna(0)
 
-    comissoes_detalhadas = df_comissao[colunas_comissao].sum()
-    comissao_total = comissoes_detalhadas.sum()
+    comissoes_detalhadas = {
+        'Taxa de comissão bruta': df_comissao[coluna_comissao].sum(),
+        'Taxa de serviço bruta': df_comissao[coluna_servico].sum(),
+        'Cupom do vendedor': df_comissao[coluna_cupom_vendedor].sum(),
+        'Cupom Shopee': df_comissao[coluna_cupom_shopee].sum()
+    }
+
+    comissao_total = sum(comissoes_detalhadas.values())
 
     # -------------------- DEVOLUÇÕES --------------------
     if 'Status da Devolução / Reembolso' not in df_shopee.columns:
@@ -71,22 +101,13 @@ def processar_shopee(file_shopee):
 
     # -------------------- ENTREGA DIRETA --------------------
     valor_entrega_direta = 0
-    if (
-        'ID do pedido' in df_shopee.columns
-        and 'Opção de envio' in df_shopee.columns
-        and 'Valor estimado do frete' in df_shopee.columns
-    ):
-        df_entrega = df_shopee.copy()
-
-        df_entrega = df_entrega.drop_duplicates(subset=['ID do pedido'], keep='first')
+    if {'ID do pedido', 'Opção de envio', 'Valor estimado do frete'}.issubset(df_shopee.columns):
+        df_entrega = df_shopee.drop_duplicates(subset=['ID do pedido'], keep='first')
         df_entrega = df_entrega[
-            ~df_entrega[status_coluna].str.contains('|'.join(padroes_exclusao), case=False, na=False)
+            df_entrega['Opção de envio'].str.contains(
+                'Shopee Entrega Direta', case=False, na=False
+            )
         ]
-
-        df_entrega = df_entrega[
-            df_entrega['Opção de envio'].str.contains('Shopee Entrega Direta', case=False, na=False)
-        ]
-
         df_entrega['Valor estimado do frete'] = pd.to_numeric(
             df_entrega['Valor estimado do frete'], errors='coerce'
         ).fillna(0)
@@ -96,14 +117,13 @@ def processar_shopee(file_shopee):
     # -------------------- QUANTIDADE DE PEDIDOS --------------------
     qtd_pedidos = 0
     if 'ID do pedido' in df_shopee.columns:
-        df_pedidos = df_shopee.copy()
-        df_pedidos = df_pedidos.drop_duplicates(subset=['ID do pedido'], keep='first')
-        df_pedidos = df_pedidos[
-            ~df_pedidos[status_coluna].str.contains('|'.join(padroes_exclusao), case=False, na=False)
-        ]
-        qtd_pedidos = len(df_pedidos)
+        qtd_pedidos = (
+            df_shopee
+            .drop_duplicates(subset=['ID do pedido'])
+            .shape[0]
+        )
 
-    # -------------------- PLANILHA DE SAÍDA --------------------
+    # -------------------- DRE --------------------
     tabela_resumo = {
         'Faturamento Shopee': faturamento_total,
         'Taxa de comissão bruta': comissoes_detalhadas['Taxa de comissão bruta'],
@@ -118,6 +138,7 @@ def processar_shopee(file_shopee):
 
     df_dre = pd.DataFrame(tabela_resumo.items(), columns=['Descrição', 'Valor'])
 
+    # -------------------- DESTAQUES NO EXCEL --------------------
     destaques = [
         'Faturamento Shopee',
         'Comissão Total',
@@ -136,8 +157,13 @@ def processar_shopee(file_shopee):
     os.makedirs(output_dir, exist_ok=True)
 
     output_filepath = os.path.join(output_dir, "DRE_shopee.xlsx")
+
     try:
-        df_styled.to_excel(output_filepath, index=False, engine="openpyxl")
+        df_styled.to_excel(
+            output_filepath,
+            index=False,
+            engine="openpyxl"
+        )
     except Exception as e:
         return f"Erro ao gerar o arquivo Excel: {e}"
 
@@ -149,33 +175,27 @@ def main():
     st.title("📊 Gerador de DRE - Shopee")
     st.write("Envie sua planilha da Shopee para gerar o relatório.")
 
-    marketplace = st.radio(
-        "🛒 Selecione o Marketplace:",
-        ["Shopee", "Mercado Livre", "Amazon"],
-        horizontal=True
+    file_shopee = st.file_uploader(
+        "🔽 Envie a planilha Shopee:",
+        type=["xls", "xlsx"]
     )
 
-    if marketplace == "Shopee":
-        file_shopee = st.file_uploader(
-            "🔽 Envie a planilha Shopee:",
-            type=["xls", "xlsx"]
-        )
+    if file_shopee is not None and st.button("📊 Gerar Relatório"):
+        st.info("🔄 Processando... Aguarde.")
+        output = processar_shopee(file_shopee)
 
-        if file_shopee is not None and st.button("📊 Gerar Relatório"):
-            st.info("🔄 Processando... Aguarde.")
-            output = processar_shopee(file_shopee)
+        if "Erro" in output:
+            st.error(output)
+        else:
+            st.success("✅ Relatório gerado com sucesso!")
+            with open(output, "rb") as f:
+                st.download_button(
+                    label="📥 Baixar Relatório Shopee (DRE)",
+                    data=f,
+                    file_name="DRE_shopee.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
 
-            if "Erro" in output:
-                st.error(output)
-            else:
-                st.success("✅ Relatório gerado com sucesso!")
-                with open(output, "rb") as f:
-                    st.download_button(
-                        label="📥 Baixar Relatório Shopee (DRE)",
-                        data=f,
-                        file_name="DRE_shopee.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
 
 if __name__ == "__main__":
     main()
