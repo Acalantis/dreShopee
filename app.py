@@ -61,7 +61,7 @@ def processar_shopee(file_shopee):
         ['Taxa de serviço bruta', 'Taxa de serviço']
     )
     coluna_cupom_vendedor = encontrar_coluna(df_comissao, ['Cupom'])
-    coluna_cupom_shopee = encontrar_coluna(df_comissao, ['Cupom Shopee'])
+    coluna_cupom_shopee = encontrar_coluna(df_comissao, ['Cupom'])
 
     if not coluna_comissao:
         return "Erro: Não foi encontrada a coluna de Taxa de comissão."
