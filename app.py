@@ -70,7 +70,7 @@ def processar_shopee(file_shopee):
     if not coluna_cupom_vendedor:
         return "Erro: A coluna 'Cupom do vendedor' não foi encontrada."
     if not coluna_cupom_shopee:
-        return "Erro: A coluna 'Cupom Shopee' não foi encontrada."
+        return "Erro: A coluna 'Cupom' não foi encontrada."
 
     for coluna in [
         coluna_comissao,
